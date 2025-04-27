@@ -80,7 +80,6 @@ int main(int argc, char **argv)
     switch (command)
     {
     case LIST:
-        printf("Listing files...\n");
         list_files();
         break;
     case GET:
@@ -421,11 +420,6 @@ int list_files() {
     // Sort filenames
     qsort(all_files, file_count, sizeof(char *), compare_strings);
 
-    // print all files
-    for (int i = 0; i < file_count; i++) {
-        printf("     %s\n", all_files[i]);
-    }
-
     // Process unique filenames and check for all chunks
 
     for (int i = 0; i < file_count; i++) {
@@ -500,12 +494,12 @@ int get_file(char *filename) {
         return -1;
     }
 
-    for (int chunk = 0; chunk < 4; ++chunk) {
-        int server1 = chunk_distribution[hash_index][chunk][0];
-        int server2 = chunk_distribution[hash_index][chunk][1];
+    for (int i = 0; i < 4; i++) {
+        int server1 = chunk_distribution[hash_index][i][0];
+        int server2 = chunk_distribution[hash_index][i][1];
 
         char chunkname[256];
-        snprintf(chunkname, sizeof(chunkname), "%s.%d", filename, chunk);
+        snprintf(chunkname, sizeof(chunkname), "%s.%d", filename, i);
 
         int got_chunk = 0;
         // Try both servers for this chunk
@@ -517,10 +511,10 @@ int get_file(char *filename) {
         }
 
         if (!got_chunk) {
-            fprintf(stderr, "%s is incomplete without chunk %d\n", filename, chunk);
-            // fclose(file);
-            // remove(filename);
-            // return -1;
+            fprintf(stderr, "%s is incomplete without chunk %d\n", filename, i);
+            fclose(file);
+            remove(filename);
+            return -1;
         }
     }
 
@@ -535,38 +529,57 @@ int send_get_to_server(int serverfd, const char *chunkname, FILE *file) {
     long chunk_size;
     char request[512];
     snprintf(request, sizeof(request), "%d %s\r\n\r\n", GET, chunkname);
+    printf("Sending request: %s", request);
 
     // Send GET request
     if (send(serverfd, request, strlen(request), 0) < 0) return -1;
-    usleep(100000);  // 100ms delay
 
-    char buf[MAXLINE];
-    int n;
-    while ((n = recv(serverfd, buf, sizeof(buf), 0)) <= 0)
+    // Receive header in chunks until we find the end
+    char buf[MAXLINE] = {0};
+    int total_received = 0;
+    int found_end = 0;
 
-    if (n <= 0) { 
-        fprintf(stderr, "Error: Failed to receive header from server\n");
+    while (total_received < sizeof(buf) - 1 && !found_end) {
+        int n = recv(serverfd, buf + total_received, sizeof(buf) - total_received - 1, 0);
+        if (n <= 0) {
+            fprintf(stderr, "Error: Failed to receive header from server\n");
+            return -1;
+        }
+        total_received += n;
+        buf[total_received] = '\0';
+        printf("Received %d bytes, total %d: %s\n", n, total_received, buf);
+        
+        // Check if we've received the complete header
+        if (strstr(buf, "\r\n\r\n")) {
+            found_end = 1;
+            printf("Found end of header\n");
+        }
+    }
+
+    if (!found_end) {
+        fprintf(stderr, "Error: Incomplete header received\n");
         return -1;
     }
 
     // Find end of header
     char *header_end = strstr(buf, "\r\n\r\n");
     if (!header_end) {
-        fprintf(stderr, "Error: Header not found\n");
-        send(serverfd, "Error: Header not found", 24, 0);
+        fprintf(stderr, "Error: Header not found in: %s\n", buf);
         return -1;
     }
     int header_len = header_end - buf + 4;
+    printf("Header length: %d\n", header_len);
 
     // Parse header
-    if (sscanf(buf, "%*s %ld", &chunk_size) != 1) {
-        fprintf(stderr, "Error: Invalid GET request format\n");
-        send(serverfd, "Error: Invalid GET request format", 34, 0);
+    char resp_chunkname[256];
+    if (sscanf(buf, "%255s %ld", resp_chunkname, &chunk_size) != 2) {
+        fprintf(stderr, "Error: Invalid header format: %s\n", buf);
         return -1;
     }
+    printf("Parsed header: chunkname=%s, size=%ld\n", resp_chunkname, chunk_size);
 
     // Write any data already received after the header
-    int data_in_buffer = strlen(buf) - header_len;
+    int data_in_buffer = total_received - header_len;
     long bytes_written = 0;
     if (data_in_buffer > 0) {
         int to_write = (chunk_size < data_in_buffer) ? chunk_size : data_in_buffer;
@@ -581,14 +594,14 @@ int send_get_to_server(int serverfd, const char *chunkname, FILE *file) {
         int n = recv(serverfd, data_buf, to_read, 0);
         if (n <= 0) {
             fprintf(stderr, "Error: Failed to receive file data for %s\n", chunkname);
-            send(serverfd, "Error: Failed to receive file data", 35, 0);
             return -1;
         }
         fwrite(data_buf, 1, n, file);
         bytes_written += n;
     }
 
-    printf("Saved file %s (%ld bytes)\n", chunkname, bytes_written);
-    send(serverfd, "OK", 2, 0); // Send ACK
+    // Send ACK
+    if (send(serverfd, "OK", 2, 0) < 0) return -1;
+
     return 0;
 }

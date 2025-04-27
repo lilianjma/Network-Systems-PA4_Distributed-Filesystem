@@ -247,56 +247,65 @@ int put_handler(int connfd, char* buf) {
 }
 
 int get_handler(int connfd, char* buf) {
-    char chunkname[256];
+    // Get filename from request
+    char filename[128];
+    sscanf(buf, "%*d %127s", filename);
 
-    // Parse the request: "1 filename.chunk\r\n\r\n"
-    if (sscanf(buf, "%*d %255s", chunkname) != 1) {
-        fprintf(stderr, "Error: Invalid GET request format\n");
-        send(connfd, "Error: Invalid GET request format\n", 35, 0);
-        return -1;
-    }
-
-    // Build path to file
+    // Create file path
     char filepath[512];
-    snprintf(filepath, sizeof(filepath), "%s/%s", server_dir, chunkname);
+    snprintf(filepath, sizeof(filepath), "%s/%s", server_dir, filename);
 
-    // Open chunk file
-    FILE *file = fopen(filepath, "rb");
-    if (!file) {
-        fprintf(stderr, "Error: Chunk file %s not found\n", filepath);
-        send(connfd, "Chunk file not found\n", 22, 0);
+    // Open file
+    FILE *fp = fopen(filepath, "rb");
+    if (!fp) {
+        fprintf(stderr, "get %s failed to open file.\n", filepath);
+        send(connfd, "Error: Failed to open file", 29, 0);
         return -1;
     }
 
     // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
+    fseek(fp, 0, SEEK_END);
+    long filesize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
 
-    // Send header: "<filename.chunk> <size>\r\n\r\n"
+    // Prepare header: "filename.chunk chunk_size\r\n\r\n"
     char header[512];
-    snprintf(header, sizeof(header), "%s %ld\r\n\r\n", chunkname, file_size);
+    snprintf(header, sizeof(header), "%s %ld\r\n\r\n", filename, filesize);
 
-    // Create buffer add header
-    char *data_buf;
-    data_buf = malloc(file_size+strlen(header));
-    strcpy(data_buf, header);
-
-    // Read file and send to client
-    int n = fread(data_buf+strlen(header), 1, file_size, file);
-    send(connfd, data_buf, n, 0);
-    fclose(file);
-    free(data_buf);
-
-    // Recieve ACK
-    char ack[16];
-    int ack_len = recv(connfd, ack, sizeof(ack)-1, 0);
-    if (ack_len <= 0 || strncmp(ack, "OK", 2) != 0) {
-        fprintf(stderr, "No ACK from client or error, client %d\n", connfd);
+    // Put file into memory
+    unsigned char *filedata = malloc(filesize + strlen(header));
+    if (!filedata) {
+        fprintf(stderr, "%s put failed.\n", filename);
+        fclose(fp);
         return -1;
     }
 
-    printf("Sent chunk %s (%ld bytes)\n", chunkname, file_size);
+    // Copy header to filedata
+    memcpy(filedata, header, strlen(header));
+
+    // Read file into filedata
+    if (fread(filedata + strlen(header), 1, filesize, fp) != filesize) {
+        fprintf(stderr, "%s put failed.\n", filename);
+        free(filedata);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+
+    // Send data
+    send(connfd, filedata, filesize + strlen(header), 0);
+
+    // Wait for acknowledgment
+    char ack[16];
+    int ack_len = recv(connfd, ack, sizeof(ack)-1, 0);
+    if (ack_len <= 0 || strncmp(ack, "OK", 2) != 0) {
+        fprintf(stderr, "No ACK from server or error, client %d\n", connfd);
+        free(filedata);
+        return -1;
+    }
+
+    free(filedata);
+    printf("%s put succeeded.\n", filename);
     return 0;
 }
 
