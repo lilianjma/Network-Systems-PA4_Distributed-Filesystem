@@ -10,7 +10,6 @@
 #define LISTENQ 			200	 /*maximum number of client connections*/
 
 // Client definitions
-#define CONFIG_PATH "./dfc.conf" //TODO CHANGE BEFORE SUBMISSION
 static const int chunk_distribution[4][4][2] = {
     { {0,1}, {1,2}, {2,3}, {3,0} },
     { {3,0}, {0,1}, {1,2}, {2,3} },
